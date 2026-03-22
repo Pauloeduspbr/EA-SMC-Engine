@@ -1,0 +1,36 @@
+# Build artifacts
+dll/build/
+*.dll
+*.exe
+*.obj
+*.o
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Python (legacy reference)
+__pycache__/
+*.pyc
+*.pkl
+*.parquet
+.venv/
+*.egg-info/
+
+# MT5
+*.ex5
+*.log
+logs/
+pids/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/
+*.csv
+
+# Claude memory (local only)
+.claude/
+tests/test.gif
