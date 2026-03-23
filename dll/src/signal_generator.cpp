@@ -434,7 +434,13 @@ SignalCandidate SignalGenerator::ScanFVGFill(int dir, int bar_idx,
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
     if (!Build(c, dir, STRAT_FVG_FILL, price, sl, tp, bar_idx, config_.min_rr_ratio)) return MakeEmpty();
 
-    c.has_bos = true;
+    // Check if current trend is from BOS or CHoCH
+    StructureBreak last_bos = structure.GetLastBOS();
+    StructureBreak last_choch = structure.GetLastCHoCH();
+    if (last_bos.index >= 0 && static_cast<int>(last_bos.direction) == dir)
+        c.has_bos = true;
+    if (last_choch.index >= 0 && static_cast<int>(last_choch.direction) == dir)
+        c.has_choch = true;
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
 
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();

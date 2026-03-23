@@ -253,8 +253,6 @@ ENUM_MARKET_TYPE g_marketType;
 int    g_tradesToday;
 datetime g_lastTradeDate;
 datetime g_lastBarTime;
-bool   g_beExecuted[];         // track BE per position ticket
-
 // Performance tracking
 int    g_totalTrades;
 double g_totalProfit;
@@ -782,7 +780,10 @@ bool IsTimeAllowed()
    int mins = dt.hour * 60 + dt.min;
    int startMins = TimeStringToMinutes(InpTimeStart);
    int endMins   = TimeStringToMinutes(InpTimeEnd);
-   return (mins >= startMins && mins <= endMins);
+   if(startMins <= endMins)
+      return (mins >= startMins && mins <= endMins);
+   else  // overnight wrap-around (e.g. 22:00-06:00)
+      return (mins >= startMins || mins <= endMins);
 }
 
 int TimeStringToMinutes(string timeStr)

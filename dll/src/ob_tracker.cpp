@@ -100,8 +100,8 @@ void OrderBlockTracker::CalculateBullish(const std::vector<Bar>& bars, const Swi
 
             // Find the candle with lowest low between swing high and current bar
             int ob_idx = i - 1;
-            double ob_btm = bars[i - 1].high;  // default: previous bar
-            double ob_top = bars[i - 1].low;
+            double ob_btm = bars[i - 1].low;   // OB bottom = candle low
+            double ob_top = bars[i - 1].high;   // OB top = candle high
 
             if (i - last_sh_idx > 1) {
                 int start = last_sh_idx + 1;
