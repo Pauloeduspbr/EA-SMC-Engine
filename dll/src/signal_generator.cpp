@@ -338,7 +338,15 @@ SignalCandidate SignalGenerator::ScanOBBounce(int dir, int bar_idx,
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
     if (!Build(c, dir, STRAT_OB_BOUNCE, price, sl, tp, bar_idx, config_.min_rr_ratio)) return MakeEmpty();
 
-    c.has_bos = (structure.GetCurrentTrend() == static_cast<TrendDirection>(dir));
+    // Check if current trend is from BOS or CHoCH
+    {
+        StructureBreak lb = structure.GetLastBOS();
+        StructureBreak lc = structure.GetLastCHoCH();
+        if (lb.index >= 0 && static_cast<int>(lb.direction) == dir)
+            c.has_bos = true;
+        if (lc.index >= 0 && static_cast<int>(lc.direction) == dir)
+            c.has_choch = true;
+    }
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
 
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();
