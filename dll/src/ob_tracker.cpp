@@ -66,23 +66,27 @@ void OrderBlockTracker::CalculateBullish(const std::vector<Bar>& bars, const Swi
                 // Visit tracking: price enters OB zone
                 bool in_zone = (bars[i].low <= ob.top && bars[i].high >= ob.bottom);
                 if (in_zone) {
-                    // Only count if price was outside on previous bar
                     if (i > 0) {
                         bool was_outside = (bars[i-1].low > ob.top || bars[i-1].high < ob.bottom);
                         if (was_outside) ob.visit_count++;
                     }
                 }
 
-                // Check mitigation: price low < OB bottom
+                // Mitigation: body close through OB invalidates it
+                // Wick-through alone does NOT mitigate on first visit (ICT: price
+                // tests OB zone and bounces — the wick IS the entry confirmation)
                 bool mit = false;
-                if (!close_mitigation_) {
-                    mit = bars[i].low < ob.bottom;
+                double body_low = std::min(bars[i].open, bars[i].close);
+                if (close_mitigation_ || ob.visit_count >= 1) {
+                    // After first visit OR if close_mitigation enabled: body must break
+                    mit = body_low < ob.bottom;
                 } else {
-                    mit = std::min(bars[i].open, bars[i].close) < ob.bottom;
+                    // Before first visit: only full candle close below = mitigation
+                    mit = bars[i].close < ob.bottom;
                 }
                 if (mit) {
                     ob.mitigated = true;
-                    ob.mitigated_index = i - 1;
+                    ob.mitigated_index = i;
                 }
             }
             ++k;
@@ -188,12 +192,14 @@ void OrderBlockTracker::CalculateBearish(const std::vector<Bar>& bars, const Swi
                     if (was_outside) ob.visit_count++;
                 }
 
-                // Check mitigation: price high > OB top
+                // Mitigation: body close through OB invalidates it
+                // Same ICT logic as bullish: wick-through on first visit is the entry
                 bool mit = false;
-                if (!close_mitigation_) {
-                    mit = bars[i].high > ob.top;
+                double body_high = std::max(bars[i].open, bars[i].close);
+                if (close_mitigation_ || ob.visit_count >= 1) {
+                    mit = body_high > ob.top;
                 } else {
-                    mit = std::max(bars[i].open, bars[i].close) > ob.top;
+                    mit = bars[i].close > ob.top;
                 }
                 if (mit) {
                     ob.mitigated = true;

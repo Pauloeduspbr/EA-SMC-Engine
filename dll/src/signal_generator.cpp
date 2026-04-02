@@ -39,8 +39,12 @@ Signal SignalGenerator::Generate(
         if (c.signal.direction != 0) candidates.push_back(c);
     }
     if (config_.choch_reversal.enabled) {
-        auto c = ScanCHoCHReversal(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-        if (c.signal.direction != 0) candidates.push_back(c);
+        // CHoCH reversal: scan BOTH directions because a CHoCH signals
+        // a trend change — the new direction may not yet be the current trend
+        auto c1 = ScanCHoCHReversal(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
+        if (c1.signal.direction != 0) candidates.push_back(c1);
+        auto c2 = ScanCHoCHReversal(-direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
+        if (c2.signal.direction != 0) candidates.push_back(c2);
     }
     if (config_.fvg_fill.enabled) {
         auto c = ScanFVGFill(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
@@ -180,45 +184,61 @@ double SignalGenerator::FindStructuralTP(
     const SwingDetector& swings, const LiquidityMapper& liq_mapper) const
 {
     int n = static_cast<int>(bars.size());
-    int min_bar = n - 1 - config_.max_tp_lookback;
     double min_tp = config_.min_tp_distance;
-    double tp = 0.0, best_dist = 1e18;
+    double tp = 0.0;
 
-    if (direction == 1) {
-        for (int i = swings.GetCount() - 1; i >= 0; --i) {
-            const auto& s = swings.Get(i);
-            if (s.index < min_bar) break;
-            if (s.type == SWING_HIGH && s.level > entry) {
-                double d = s.level - entry;
-                if (min_tp > 0 && d < min_tp) continue;
-                if (d < best_dist) { best_dist = d; tp = s.level; }
+    // Progressive lookback: try configured, then 2x, then all bars
+    // This ensures we always find a structural target if one exists
+    int lookbacks[] = { config_.max_tp_lookback, config_.max_tp_lookback * 2, n };
+
+    for (int attempt = 0; attempt < 3 && tp == 0.0; ++attempt) {
+        int min_bar = n - 1 - lookbacks[attempt];
+        if (min_bar < 0) min_bar = 0;
+        double best_dist = 1e18;
+
+        if (direction == 1) {
+            for (int i = swings.GetCount() - 1; i >= 0; --i) {
+                const auto& s = swings.Get(i);
+                if (s.index < min_bar) break;
+                if (s.type == SWING_HIGH && s.level > entry) {
+                    double d = s.level - entry;
+                    if (min_tp > 0 && d < min_tp) continue;
+                    if (d < best_dist) { best_dist = d; tp = s.level; }
+                }
+            }
+        } else {
+            for (int i = swings.GetCount() - 1; i >= 0; --i) {
+                const auto& s = swings.Get(i);
+                if (s.index < min_bar) break;
+                if (s.type == SWING_LOW && s.level < entry) {
+                    double d = entry - s.level;
+                    if (min_tp > 0 && d < min_tp) continue;
+                    if (d < best_dist) { best_dist = d; tp = s.level; }
+                }
             }
         }
+    }
+
+    // Also check liquidity pools (not limited by lookback)
+    if (direction == 1) {
         const LiquidityPool* pool = liq_mapper.FindNearest(entry, 1);
         if (pool && pool->level > entry) {
             double d = pool->level - entry;
-            if ((min_tp <= 0 || d >= min_tp) && d < best_dist) tp = pool->level;
+            if ((min_tp <= 0 || d >= min_tp) && (tp == 0.0 || d < std::fabs(tp - entry)))
+                tp = pool->level;
         }
     } else {
-        for (int i = swings.GetCount() - 1; i >= 0; --i) {
-            const auto& s = swings.Get(i);
-            if (s.index < min_bar) break;
-            if (s.type == SWING_LOW && s.level < entry) {
-                double d = entry - s.level;
-                if (min_tp > 0 && d < min_tp) continue;
-                if (d < best_dist) { best_dist = d; tp = s.level; }
-            }
-        }
         const LiquidityPool* pool = liq_mapper.FindNearest(entry, -1);
         if (pool && pool->level < entry) {
             double d = entry - pool->level;
-            if ((min_tp <= 0 || d >= min_tp) && d < best_dist) tp = pool->level;
+            if ((min_tp <= 0 || d >= min_tp) && (tp == 0.0 || d < std::fabs(tp - entry)))
+                tp = pool->level;
         }
     }
 
     if (tp == 0.0) return 0.0;
 
-    // Max TP
+    // Max TP cap
     if (config_.max_tp_distance > 0) {
         double d = std::fabs(tp - entry);
         if (d > config_.max_tp_distance)
@@ -266,6 +286,7 @@ void SignalGenerator::FillConfluence(
     if (ob) visits = std::max(visits, ob->visit_count);
     if (fvg) visits = std::max(visits, fvg->visit_count);
     c.zone_is_fresh = (visits <= 1);
+    c.zone_visit_count = visits;
     c.ob_high_prob = (ob && ob->high_prob);
 }
 
@@ -274,16 +295,14 @@ void SignalGenerator::FillConfluence(
 // ============================================================================
 
 bool SignalGenerator::PassesStrategyFilters(const SignalCandidate& c, const StrategyParams& sp) const {
-    // Calculate score NOW (before checking min_score)
     double score = CalculateScore(c);
     if (score < sp.min_score) return false;
     if (sp.require_ote && !c.in_ote_zone) return false;
     if (sp.require_high_prob && !c.ob_high_prob) return false;
     if (sp.require_kill_zone && !c.in_kill_zone) return false;
-    if (sp.max_zone_visits > 0) {
-        // Check via zone_is_fresh: if max_visits=1 and not fresh → reject
-        if (!c.zone_is_fresh && sp.max_zone_visits <= 1) return false;
-    }
+    // max_zone_visits is checked per-scanner (OB/FVG have their own checks)
+    // This is a final guard using the zone_visit_count stored in the candidate
+    if (sp.max_zone_visits > 0 && c.zone_visit_count > sp.max_zone_visits) return false;
     return true;
 }
 
@@ -294,6 +313,7 @@ SignalCandidate SignalGenerator::MakeEmpty() const {
     c.has_ob = c.has_fvg = c.has_bos = c.has_choch = false;
     c.in_premium_discount = c.in_ote_zone = c.has_liq_sweep = false;
     c.ob_fvg_overlap = c.in_kill_zone = c.zone_is_fresh = c.ob_high_prob = false;
+    c.zone_visit_count = 0;
     return c;
 }
 
@@ -479,8 +499,21 @@ SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
         && (bar_idx - last_bos.index) <= sp.lookback) { has_struct = true; }
     if (!has_struct) return c;
 
+    // After sweep, price displaces rapidly. Entry confirmation:
+    // price must be in OB/FVG zone OR near a recent OB/FVG (within SL range)
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
+    bool near_ob = false;
+    if (!ob) {
+        // Check if there's a nearby active OB in the right direction
+        for (const auto* active_ob : ob_tracker.GetActiveOBs(dir)) {
+            double ob_mid = (active_ob->top + active_ob->bottom) / 2.0;
+            double dist = std::fabs(price - ob_mid);
+            double zone_h = active_ob->top - active_ob->bottom;
+            // Accept if price is within 2x the OB zone height
+            if (dist <= zone_h * 2.0) { ob = active_ob; near_ob = true; break; }
+        }
+    }
     if (!ob && !fvg) return c;
 
     double sl = FindStructuralSL(dir, price, bars, swings, ob_tracker, fvg_detector, sp);

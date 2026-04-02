@@ -97,6 +97,8 @@ public:
     int GetBarCount() const;
 
 private:
+    static constexpr int MAX_BARS = 1500; // sliding window cap
+
     std::mutex          mtx_;
     std::vector<Bar>    bars_;
     SwingDetector       swing_detector_;

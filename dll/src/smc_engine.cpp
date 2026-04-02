@@ -78,6 +78,12 @@ void SMCEngine::FeedBar(double open, double high, double low, double close,
     std::lock_guard<std::mutex> lock(mtx_);
     Bar bar{}; bar.open=open; bar.high=high; bar.low=low; bar.close=close; bar.volume=volume; bar.time=time;
     bars_.push_back(bar);
+
+    // Sliding window: trim oldest bars to keep processing O(MAX_BARS)
+    if (static_cast<int>(bars_.size()) > MAX_BARS) {
+        int excess = static_cast<int>(bars_.size()) - MAX_BARS;
+        bars_.erase(bars_.begin(), bars_.begin() + excess);
+    }
 }
 
 int SMCEngine::Process() {

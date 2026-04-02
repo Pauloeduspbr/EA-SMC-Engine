@@ -90,6 +90,7 @@ struct SignalCandidate {
     bool has_ob, has_fvg, has_bos, has_choch;
     bool in_premium_discount, in_ote_zone, has_liq_sweep;
     bool ob_fvg_overlap, in_kill_zone, zone_is_fresh, ob_high_prob;
+    int  zone_visit_count;
 };
 
 class SignalGenerator {
