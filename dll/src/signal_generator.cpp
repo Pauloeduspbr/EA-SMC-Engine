@@ -11,7 +11,10 @@ const SignalConfig& SignalGenerator::GetConfig() const { return config_; }
 void SignalGenerator::SetConfig(const SignalConfig& config) { config_ = config; }
 
 // ============================================================================
-// Generate — scans all enabled strategies with per-strategy params
+// Generate — ICT-correct entry logic:
+//   1. Determine direction (bias > CHoCH > trend)
+//   2. ALL scanners require PULLBACK to zone (not impulse through zone)
+//   3. ALL scanners enforce premium/discount (buy discount, sell premium)
 // ============================================================================
 
 Signal SignalGenerator::Generate(
@@ -25,17 +28,13 @@ Signal SignalGenerator::Generate(
     int n = static_cast<int>(bars.size());
     if (n < 50) return last_signal_;
 
-    // Direction logic:
-    // 1. Check for recent CHoCH — it OVERRIDES bias (signals trend change)
-    // 2. If no CHoCH, use bias (HTF swing structure)
-    // 3. Trend (last BOS/CHoCH) must confirm direction
-    TrendDirection bias = structure.GetBias();
-    TrendDirection trend = structure.GetCurrentTrend();
     int bar_idx = n - 1;
 
-    // CHoCH overrides bias: if recent CHoCH exists, use its direction
-    // CHoCH = "Change of Character" = the market is REVERSING
-    // Use the CHoCH strategy's own lookback setting (not hardcoded)
+    // --- Direction determination ---
+    TrendDirection bias = structure.GetBias();
+    TrendDirection trend = structure.GetCurrentTrend();
+
+    // CHoCH overrides bias (signals reversal)
     StructureBreak last_choch = structure.GetLastCHoCH();
     int choch_lookback = config_.choch_reversal.lookback;
     bool choch_active = (last_choch.index >= 0 &&
@@ -44,20 +43,17 @@ Signal SignalGenerator::Generate(
 
     int direction = 0;
     if (choch_active) {
-        // CHoCH direction takes priority — it signals the NEW trend
         direction = static_cast<int>(last_choch.direction);
     } else if (bias != TREND_NONE) {
         direction = static_cast<int>(bias);
-        // If trend exists and conflicts with bias, do not trade
-        if (trend != TREND_NONE && trend != bias) {
-            return last_signal_;
-        }
+        if (trend != TREND_NONE && trend != bias) return last_signal_;
     } else if (trend != TREND_NONE) {
         direction = static_cast<int>(trend);
     } else {
         return last_signal_;
     }
 
+    // --- Scan strategies ---
     std::vector<SignalCandidate> candidates;
 
     if (config_.ob_bounce.enabled) {
@@ -69,8 +65,6 @@ Signal SignalGenerator::Generate(
         if (c.signal.direction != 0) candidates.push_back(c);
     }
     if (config_.choch_reversal.enabled) {
-        // CHoCH reversal: scan in trend direction only
-        // The CHoCH already changed the trend — we trade the NEW trend direction
         auto c = ScanCHoCHReversal(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
         if (c.signal.direction != 0) candidates.push_back(c);
     }
@@ -83,6 +77,7 @@ Signal SignalGenerator::Generate(
         if (c.signal.direction != 0) candidates.push_back(c);
     }
 
+    // --- Select best candidate ---
     SignalCandidate best = MakeEmpty();
     for (auto& c : candidates) {
         c.score = CalculateScore(c);
@@ -90,7 +85,6 @@ Signal SignalGenerator::Generate(
     }
 
     if (best.signal.direction != 0) {
-        // Mark the structure break as used to prevent repeat signals
         if (best.signal.strategy == STRAT_BOS_CONTINUATION) {
             StructureBreak lb = structure.GetLastBOS();
             last_used_bos_index_ = lb.broken_index;
@@ -107,7 +101,68 @@ Signal SignalGenerator::Generate(
 }
 
 // ============================================================================
-// Helpers
+// IsValidPullback — THE critical ICT function
+// Checks that price was AWAY from the zone and is now RETURNING
+// ============================================================================
+
+bool SignalGenerator::IsValidPullback(const std::vector<Bar>& bars, int bar_idx,
+    double zone_top, double zone_bottom, int direction, int min_away_bars) const
+{
+    if (bar_idx < min_away_bars + 1) return false;
+
+    // Current bar must be IN or TOUCHING the zone
+    bool in_zone_now = (bars[bar_idx].low <= zone_top && bars[bar_idx].high >= zone_bottom);
+    if (!in_zone_now) return false;
+
+    // Count bars where price was AWAY from the zone (on the impulse side)
+    // For BUY pullback: price was ABOVE zone (impulse went up, now retracing down)
+    // For SELL pullback: price was BELOW zone (impulse went down, now retracing up)
+    int away_count = 0;
+    for (int i = bar_idx - 1; i >= std::max(0, bar_idx - 20); --i) {
+        bool away = false;
+        if (direction == 1) {
+            // BUY: price should have been ABOVE the zone (came from above, pulling back down)
+            away = (bars[i].low > zone_top);
+        } else {
+            // SELL: price should have been BELOW the zone (came from below, pulling back up)
+            away = (bars[i].high < zone_bottom);
+        }
+        if (away) {
+            away_count++;
+        } else {
+            // If we hit a bar that's in/touching the zone, check if we already
+            // accumulated enough away bars
+            if (away_count >= min_away_bars) break;
+            // Otherwise, price hasn't been away long enough — could be consolidation
+            // Reset and keep looking further back
+            away_count = 0;
+        }
+    }
+
+    return away_count >= min_away_bars;
+}
+
+// ============================================================================
+// HasConfirmingBreak — validates a BOS/CHoCH occurred after zone creation
+// ============================================================================
+
+bool SignalGenerator::HasConfirmingBreak(const StructureAnalyzer& structure,
+    int dir, int zone_bar, int bar_idx) const
+{
+    for (int i = structure.GetBreakCount() - 1; i >= 0; --i) {
+        const auto& sb = structure.Get(i);
+        if (sb.broken_index < zone_bar) break;  // too old
+        if (static_cast<int>(sb.direction) == dir &&
+            sb.broken_index > zone_bar &&
+            sb.broken_index < bar_idx) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ============================================================================
+// Helpers (unchanged)
 // ============================================================================
 
 bool SignalGenerator::IsInDiscount(double price, const SwingDetector& swings) const {
@@ -156,7 +211,7 @@ bool SignalGenerator::IsInKillZone(int64_t bar_time) const {
 }
 
 // ============================================================================
-// Structural SL — per-strategy min/max with global fallback
+// Structural SL — tighter of swing vs OB
 // ============================================================================
 
 double SignalGenerator::FindStructuralSL(
@@ -166,82 +221,60 @@ double SignalGenerator::FindStructuralSL(
 {
     double sl = 0.0;
     if (direction == 1) {
-        // Nearest swing low below entry
         for (int i = swings.GetCount() - 1; i >= 0; --i) {
             const auto& s = swings.Get(i);
-            if (s.type == SWING_LOW && s.level < entry) {
-                sl = s.level;
-                break;
-            }
+            if (s.type == SWING_LOW && s.level < entry) { sl = s.level; break; }
         }
-        // OB bottom: use TIGHTER of swing low vs OB bottom (ICT: SL just beyond zone)
         const OrderBlock* ob = ob_tracker.FindOBAtPrice(entry, 1);
         if (ob && (sl == 0 || ob->bottom > sl)) sl = ob->bottom;
-
         if (sl > 0) sl -= (entry - sl) * config_.sl_zone_buffer;
     } else {
         for (int i = swings.GetCount() - 1; i >= 0; --i) {
             const auto& s = swings.Get(i);
-            if (s.type == SWING_HIGH && s.level > entry) {
-                sl = s.level;
-                break;
-            }
+            if (s.type == SWING_HIGH && s.level > entry) { sl = s.level; break; }
         }
-        // OB top: use TIGHTER of swing high vs OB top
         const OrderBlock* ob = ob_tracker.FindOBAtPrice(entry, -1);
         if (ob && (sl == 0 || ob->top < sl)) sl = ob->top;
-
         if (sl > 0) sl += (sl - entry) * config_.sl_zone_buffer;
     }
 
     if (sl == 0.0) return 0.0;
-
     double dist = std::fabs(entry - sl);
-
-    // Per-strategy min SL (fallback to global)
     double min_sl = (sp.min_sl_points > 0) ? sp.min_sl_points : config_.min_sl_distance;
     if (min_sl > 0 && dist < min_sl) {
         sl = (direction == 1) ? entry - min_sl : entry + min_sl;
         dist = min_sl;
     }
-
-    // Per-strategy max SL (fallback to global) — REJECT if too far
     double max_sl = (sp.max_sl_points > 0) ? sp.max_sl_points : config_.max_sl_distance;
     if (max_sl > 0 && dist > max_sl) return 0.0;
-
     return sl;
 }
 
 // ============================================================================
-// Structural TP
+// Structural TP — uses bias swings for larger targets
 // ============================================================================
 
 double SignalGenerator::FindStructuralTP(
     int direction, double entry, const std::vector<Bar>& bars,
     const SwingDetector& swings, const LiquidityMapper& liq_mapper) const
 {
-    int n = static_cast<int>(bars.size());
     double min_tp = config_.min_tp_distance;
     double tp = 0.0;
 
-    // Use BIAS swings first (larger structure = better TP targets)
-    // Fallback to entry swings if no bias swing target found
-    const SwingDetector* swing_sources[] = { bias_swings_, &swings };
-    int num_sources = (bias_swings_ != nullptr) ? 2 : 1;
-    if (bias_swings_ == nullptr) swing_sources[0] = &swings;
+    // Use bias swings first (larger = better structural targets)
+    const SwingDetector* sources[] = { bias_swings_, &swings };
+    int num = (bias_swings_ != nullptr) ? 2 : 1;
+    if (!bias_swings_) sources[0] = &swings;
 
-    for (int src = 0; src < num_sources && tp == 0.0; ++src) {
-        const SwingDetector& sw = *swing_sources[src];
-
-        // Find FIRST valid structural target beyond MinTP
+    for (int src = 0; src < num && tp == 0.0; ++src) {
+        const SwingDetector& sw = *sources[src];
         if (direction == 1) {
             for (int i = sw.GetCount() - 1; i >= 0; --i) {
                 const auto& s = sw.Get(i);
                 if (s.type == SWING_HIGH && s.level > entry) {
                     double d = s.level - entry;
                     if (min_tp > 0 && d < min_tp) continue;
-                    tp = s.level;
-                    break;
+                    tp = s.level; break;
                 }
             }
         } else {
@@ -250,14 +283,13 @@ double SignalGenerator::FindStructuralTP(
                 if (s.type == SWING_LOW && s.level < entry) {
                     double d = entry - s.level;
                     if (min_tp > 0 && d < min_tp) continue;
-                    tp = s.level;
-                    break;
+                    tp = s.level; break;
                 }
             }
         }
     }
 
-    // Also check liquidity pools (not limited by lookback)
+    // Liquidity pools as TP targets
     if (direction == 1) {
         const LiquidityPool* pool = liq_mapper.FindNearest(entry, 1);
         if (pool && pool->level > entry) {
@@ -275,8 +307,6 @@ double SignalGenerator::FindStructuralTP(
     }
 
     if (tp == 0.0) return 0.0;
-
-    // Max TP cap
     if (config_.max_tp_distance > 0) {
         double d = std::fabs(tp - entry);
         if (d > config_.max_tp_distance)
@@ -286,7 +316,7 @@ double SignalGenerator::FindStructuralTP(
 }
 
 // ============================================================================
-// Scoring
+// Scoring (unchanged)
 // ============================================================================
 
 double SignalGenerator::CalculateScore(const SignalCandidate& c) const {
@@ -328,18 +358,12 @@ void SignalGenerator::FillConfluence(
     c.ob_high_prob = (ob && ob->high_prob);
 }
 
-// ============================================================================
-// Per-strategy filter check
-// ============================================================================
-
 bool SignalGenerator::PassesStrategyFilters(const SignalCandidate& c, const StrategyParams& sp) const {
     double score = CalculateScore(c);
     if (score < sp.min_score) return false;
     if (sp.require_ote && !c.in_ote_zone) return false;
     if (sp.require_high_prob && !c.ob_high_prob) return false;
     if (sp.require_kill_zone && !c.in_kill_zone) return false;
-    // max_zone_visits is checked per-scanner (OB/FVG have their own checks)
-    // This is a final guard using the zone_visit_count stored in the candidate
     if (sp.max_zone_visits > 0 && c.zone_visit_count > sp.max_zone_visits) return false;
     return true;
 }
@@ -355,10 +379,6 @@ SignalCandidate SignalGenerator::MakeEmpty() const {
     return c;
 }
 
-// ============================================================================
-// Build candidate + validate RR
-// ============================================================================
-
 static bool Build(SignalCandidate& c, int dir, StrategyType strat,
                   double entry, double sl, double tp, int bar_idx, double min_rr) {
     if (sl == 0.0 || tp == 0.0) return false;
@@ -373,7 +393,7 @@ static bool Build(SignalCandidate& c, int dir, StrategyType strat,
 }
 
 // ============================================================================
-// STRATEGY 1: OB Bounce
+// STRATEGY 1: OB Bounce — enter on PULLBACK to OB in discount/premium
 // ============================================================================
 
 SignalCandidate SignalGenerator::ScanOBBounce(int dir, int bar_idx,
@@ -385,26 +405,28 @@ SignalCandidate SignalGenerator::ScanOBBounce(int dir, int bar_idx,
     const auto& sp = config_.ob_bounce;
     double price = bars[bar_idx].close;
 
+    // Find OB at current price
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     if (!ob) return c;
     if ((bar_idx - ob->index) > sp.lookback * 2) return c;
-
-    // Per-strategy zone freshness check
     if (sp.max_zone_visits > 0 && ob->visit_count > sp.max_zone_visits) return c;
+
+    // PULLBACK CHECK: price must have been AWAY from OB, now returning
+    if (!IsValidPullback(bars, bar_idx, ob->top, ob->bottom, dir, 3)) return c;
+
+    // PREMIUM/DISCOUNT: BUY must be in discount, SELL in premium
+    if (dir == 1 && !IsInDiscount(price, swings)) return c;
+    if (dir == -1 && !IsInPremium(price, swings)) return c;
 
     double sl = FindStructuralSL(dir, price, bars, swings, ob_tracker, fvg_detector, sp);
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
     if (!Build(c, dir, STRAT_OB_BOUNCE, price, sl, tp, bar_idx, config_.min_rr_ratio)) return MakeEmpty();
 
-    // Check if current trend is from BOS or CHoCH
-    {
-        StructureBreak lb = structure.GetLastBOS();
-        StructureBreak lc = structure.GetLastCHoCH();
-        if (lb.index >= 0 && static_cast<int>(lb.direction) == dir)
-            c.has_bos = true;
-        if (lc.index >= 0 && static_cast<int>(lc.direction) == dir)
-            c.has_choch = true;
-    }
+    // Confluence: check for confirming BOS/CHoCH
+    StructureBreak lb = structure.GetLastBOS();
+    StructureBreak lc = structure.GetLastCHoCH();
+    if (lb.index >= 0 && static_cast<int>(lb.direction) == dir) c.has_bos = true;
+    if (lc.index >= 0 && static_cast<int>(lc.direction) == dir) c.has_choch = true;
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
 
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();
@@ -412,7 +434,7 @@ SignalCandidate SignalGenerator::ScanOBBounce(int dir, int bar_idx,
 }
 
 // ============================================================================
-// STRATEGY 2: BOS Continuation
+// STRATEGY 2: BOS Continuation — pullback to OB/FVG AFTER BOS
 // ============================================================================
 
 SignalCandidate SignalGenerator::ScanBOSContinuation(int dir, int bar_idx,
@@ -430,9 +452,27 @@ SignalCandidate SignalGenerator::ScanBOSContinuation(int dir, int bar_idx,
     if ((bar_idx - last_bos.broken_index) > sp.lookback) return c;
     if (last_bos.broken_index == last_used_bos_index_) return c;
 
+    // Must wait at least 3 bars after BOS (don't enter on impulse candle)
+    if ((bar_idx - last_bos.broken_index) < 3) return c;
+
+    // Find POI at current price
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
     if (!ob && !fvg) return c;
+
+    // POI must have been created BEFORE or during the BOS (not after)
+    if (ob && ob->index > last_bos.broken_index) ob = nullptr;
+    if (fvg && fvg->index > last_bos.broken_index) fvg = nullptr;
+    if (!ob && !fvg) return c;
+
+    // PULLBACK CHECK
+    double zt = ob ? ob->top : fvg->top;
+    double zb = ob ? ob->bottom : fvg->bottom;
+    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, 3)) return c;
+
+    // PREMIUM/DISCOUNT
+    if (dir == 1 && !IsInDiscount(price, swings)) return c;
+    if (dir == -1 && !IsInPremium(price, swings)) return c;
 
     double sl = FindStructuralSL(dir, price, bars, swings, ob_tracker, fvg_detector, sp);
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
@@ -440,13 +480,12 @@ SignalCandidate SignalGenerator::ScanBOSContinuation(int dir, int bar_idx,
 
     c.has_bos = true;
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();
     return c;
 }
 
 // ============================================================================
-// STRATEGY 3: CHoCH Reversal
+// STRATEGY 3: CHoCH Reversal — pullback to OB/FVG after CHoCH
 // ============================================================================
 
 SignalCandidate SignalGenerator::ScanCHoCHReversal(int dir, int bar_idx,
@@ -462,12 +501,24 @@ SignalCandidate SignalGenerator::ScanCHoCHReversal(int dir, int bar_idx,
     if (last_choch.index < 0) return c;
     if (static_cast<int>(last_choch.direction) != dir) return c;
     if ((bar_idx - last_choch.broken_index) > sp.lookback) return c;
-    // Prevent same CHoCH from generating multiple signals
     if (last_choch.broken_index == last_used_choch_index_) return c;
 
+    // Wait at least 3 bars after CHoCH
+    if ((bar_idx - last_choch.broken_index) < 3) return c;
+
+    // Find POI at current price
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
     if (!ob && !fvg) return c;
+
+    // PULLBACK CHECK
+    double zt = ob ? ob->top : fvg->top;
+    double zb = ob ? ob->bottom : fvg->bottom;
+    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, 3)) return c;
+
+    // PREMIUM/DISCOUNT
+    if (dir == 1 && !IsInDiscount(price, swings)) return c;
+    if (dir == -1 && !IsInPremium(price, swings)) return c;
 
     double sl = FindStructuralSL(dir, price, bars, swings, ob_tracker, fvg_detector, sp);
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
@@ -475,13 +526,12 @@ SignalCandidate SignalGenerator::ScanCHoCHReversal(int dir, int bar_idx,
 
     c.has_choch = true;
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();
     return c;
 }
 
 // ============================================================================
-// STRATEGY 4: FVG Fill
+// STRATEGY 4: FVG Fill — pullback into FVG in discount/premium
 // ============================================================================
 
 SignalCandidate SignalGenerator::ScanFVGFill(int dir, int bar_idx,
@@ -493,31 +543,38 @@ SignalCandidate SignalGenerator::ScanFVGFill(int dir, int bar_idx,
     const auto& sp = config_.fvg_fill;
     double price = bars[bar_idx].close;
 
-    if (structure.GetCurrentTrend() != static_cast<TrendDirection>(dir)) return c;
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
     if (!fvg) return c;
     if ((bar_idx - fvg->index) > sp.lookback) return c;
     if (sp.max_zone_visits > 0 && fvg->visit_count > sp.max_zone_visits) return c;
 
+    // PULLBACK CHECK
+    if (!IsValidPullback(bars, bar_idx, fvg->top, fvg->bottom, dir, 3)) return c;
+
+    // Reaction check: price must be holding the FVG (not breaking through)
+    if (dir == 1 && price < fvg->bottom) return c;
+    if (dir == -1 && price > fvg->top) return c;
+
+    // PREMIUM/DISCOUNT
+    if (dir == 1 && !IsInDiscount(price, swings)) return c;
+    if (dir == -1 && !IsInPremium(price, swings)) return c;
+
     double sl = FindStructuralSL(dir, price, bars, swings, ob_tracker, fvg_detector, sp);
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
     if (!Build(c, dir, STRAT_FVG_FILL, price, sl, tp, bar_idx, config_.min_rr_ratio)) return MakeEmpty();
 
-    // Check if current trend is from BOS or CHoCH
+    // Confluence
     StructureBreak last_bos = structure.GetLastBOS();
     StructureBreak last_choch = structure.GetLastCHoCH();
-    if (last_bos.index >= 0 && static_cast<int>(last_bos.direction) == dir)
-        c.has_bos = true;
-    if (last_choch.index >= 0 && static_cast<int>(last_choch.direction) == dir)
-        c.has_choch = true;
+    if (last_bos.index >= 0 && static_cast<int>(last_bos.direction) == dir) c.has_bos = true;
+    if (last_choch.index >= 0 && static_cast<int>(last_choch.direction) == dir) c.has_choch = true;
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();
     return c;
 }
 
 // ============================================================================
-// STRATEGY 5: Liquidity Sweep
+// STRATEGY 5: Liquidity Sweep — sweep opposite liq, then pullback to OB/FVG
 // ============================================================================
 
 SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
@@ -529,8 +586,10 @@ SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
     const auto& sp = config_.liq_sweep;
     double price = bars[bar_idx].close;
 
+    // Opposite liquidity must have been swept
     if (!liq_mapper.WasRecentlySwepted(-dir, config_.sweep_lookback, bar_idx)) return c;
 
+    // Structural confirmation after sweep
     StructureBreak last_choch = structure.GetLastCHoCH();
     StructureBreak last_bos = structure.GetLastBOS();
     bool has_struct = false, is_choch = false;
@@ -540,22 +599,27 @@ SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
         && (bar_idx - last_bos.broken_index) <= sp.lookback) { has_struct = true; }
     if (!has_struct) return c;
 
-    // After sweep, price displaces rapidly. Entry confirmation:
-    // price must be in OB/FVG zone OR near a recent OB/FVG (within SL range)
+    // Find POI (OB/FVG at price or nearby)
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
-    bool near_ob = false;
     if (!ob) {
-        // Check if there's a nearby active OB in the right direction
         for (const auto* active_ob : ob_tracker.GetActiveOBs(dir)) {
             double ob_mid = (active_ob->top + active_ob->bottom) / 2.0;
             double dist = std::fabs(price - ob_mid);
             double zone_h = active_ob->top - active_ob->bottom;
-            // Accept if price is within 2x the OB zone height
-            if (dist <= zone_h * 2.0) { ob = active_ob; near_ob = true; break; }
+            if (dist <= zone_h * 2.0) { ob = active_ob; break; }
         }
     }
     if (!ob && !fvg) return c;
+
+    // PULLBACK CHECK
+    double zt = ob ? ob->top : fvg->top;
+    double zb = ob ? ob->bottom : fvg->bottom;
+    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, 3)) return c;
+
+    // PREMIUM/DISCOUNT
+    if (dir == 1 && !IsInDiscount(price, swings)) return c;
+    if (dir == -1 && !IsInPremium(price, swings)) return c;
 
     double sl = FindStructuralSL(dir, price, bars, swings, ob_tracker, fvg_detector, sp);
     double tp = FindStructuralTP(dir, price, bars, swings, liq_mapper);
@@ -563,7 +627,6 @@ SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
 
     c.has_bos = !is_choch; c.has_choch = is_choch; c.has_liq_sweep = true;
     FillConfluence(c, price, dir, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-
     if (!PassesStrategyFilters(c, sp)) return MakeEmpty();
     return c;
 }

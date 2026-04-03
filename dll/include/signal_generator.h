@@ -124,6 +124,17 @@ private:
     bool IsInKillZone(int64_t bar_time) const;
     int  GetHourFromTimestamp(int64_t ts) const;
 
+    // Pullback detection — THE critical function for ICT entries
+    // Returns true if price was AWAY from the zone for at least min_away_bars
+    // then RETURNED to the zone (= pullback/retracement)
+    bool IsValidPullback(const std::vector<Bar>& bars, int bar_idx,
+                         double zone_top, double zone_bottom,
+                         int direction, int min_away_bars = 3) const;
+
+    // Check if a confirming BOS/CHoCH exists between zone creation and current bar
+    bool HasConfirmingBreak(const StructureAnalyzer& structure,
+                           int dir, int zone_bar, int bar_idx) const;
+
     // SL/TP — uses per-strategy limits with global fallback
     double FindStructuralSL(int direction, double entry,
         const std::vector<Bar>& bars, const SwingDetector& swings,
