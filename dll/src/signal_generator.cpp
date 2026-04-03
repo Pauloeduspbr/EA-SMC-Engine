@@ -118,7 +118,9 @@ bool SignalGenerator::IsValidPullback(const std::vector<Bar>& bars, int bar_idx,
     // For BUY pullback: price was ABOVE zone (impulse went up, now retracing down)
     // For SELL pullback: price was BELOW zone (impulse went down, now retracing up)
     int away_count = 0;
-    for (int i = bar_idx - 1; i >= std::max(0, bar_idx - 20); --i) {
+    // Search window = 4x min_away_bars (adapts to any timeframe)
+    int search_window = min_away_bars * 4;
+    for (int i = bar_idx - 1; i >= std::max(0, bar_idx - search_window); --i) {
         bool away = false;
         if (direction == 1) {
             // BUY: price should have been ABOVE the zone (came from above, pulling back down)
@@ -412,7 +414,7 @@ SignalCandidate SignalGenerator::ScanOBBounce(int dir, int bar_idx,
     if (sp.max_zone_visits > 0 && ob->visit_count > sp.max_zone_visits) return c;
 
     // PULLBACK CHECK: price must have been AWAY from OB, now returning
-    if (!IsValidPullback(bars, bar_idx, ob->top, ob->bottom, dir, 3)) return c;
+    if (!IsValidPullback(bars, bar_idx, ob->top, ob->bottom, dir, std::max(2, sp.lookback / 10))) return c;
 
     // PREMIUM/DISCOUNT: BUY must be in discount, SELL in premium
     if (dir == 1 && !IsInDiscount(price, swings)) return c;
@@ -452,8 +454,10 @@ SignalCandidate SignalGenerator::ScanBOSContinuation(int dir, int bar_idx,
     if ((bar_idx - last_bos.broken_index) > sp.lookback) return c;
     if (last_bos.broken_index == last_used_bos_index_) return c;
 
-    // Must wait at least 3 bars after BOS (don't enter on impulse candle)
-    if ((bar_idx - last_bos.broken_index) < 3) return c;
+    // Must wait after BOS (don't enter on impulse candle)
+    // Minimum delay = 10% of lookback or 2 bars, whichever is larger
+    int min_delay_bos = std::max(2, sp.lookback / 10);
+    if ((bar_idx - last_bos.broken_index) < min_delay_bos) return c;
 
     // Find POI at current price
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
@@ -468,7 +472,7 @@ SignalCandidate SignalGenerator::ScanBOSContinuation(int dir, int bar_idx,
     // PULLBACK CHECK
     double zt = ob ? ob->top : fvg->top;
     double zb = ob ? ob->bottom : fvg->bottom;
-    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, 3)) return c;
+    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, std::max(2, sp.lookback / 10))) return c;
 
     // PREMIUM/DISCOUNT
     if (dir == 1 && !IsInDiscount(price, swings)) return c;
@@ -503,8 +507,9 @@ SignalCandidate SignalGenerator::ScanCHoCHReversal(int dir, int bar_idx,
     if ((bar_idx - last_choch.broken_index) > sp.lookback) return c;
     if (last_choch.broken_index == last_used_choch_index_) return c;
 
-    // Wait at least 3 bars after CHoCH
-    if ((bar_idx - last_choch.broken_index) < 3) return c;
+    // Wait after CHoCH (don't enter on impulse candle)
+    int min_delay_ch = std::max(2, sp.lookback / 10);
+    if ((bar_idx - last_choch.broken_index) < min_delay_ch) return c;
 
     // Find POI at current price
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
@@ -514,7 +519,7 @@ SignalCandidate SignalGenerator::ScanCHoCHReversal(int dir, int bar_idx,
     // PULLBACK CHECK
     double zt = ob ? ob->top : fvg->top;
     double zb = ob ? ob->bottom : fvg->bottom;
-    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, 3)) return c;
+    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, std::max(2, sp.lookback / 10))) return c;
 
     // PREMIUM/DISCOUNT
     if (dir == 1 && !IsInDiscount(price, swings)) return c;
@@ -549,7 +554,7 @@ SignalCandidate SignalGenerator::ScanFVGFill(int dir, int bar_idx,
     if (sp.max_zone_visits > 0 && fvg->visit_count > sp.max_zone_visits) return c;
 
     // PULLBACK CHECK
-    if (!IsValidPullback(bars, bar_idx, fvg->top, fvg->bottom, dir, 3)) return c;
+    if (!IsValidPullback(bars, bar_idx, fvg->top, fvg->bottom, dir, std::max(2, sp.lookback / 10))) return c;
 
     // Reaction check: price must be holding the FVG (not breaking through)
     if (dir == 1 && price < fvg->bottom) return c;
@@ -615,7 +620,7 @@ SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
     // PULLBACK CHECK
     double zt = ob ? ob->top : fvg->top;
     double zb = ob ? ob->bottom : fvg->bottom;
-    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, 3)) return c;
+    if (!IsValidPullback(bars, bar_idx, zt, zb, dir, std::max(2, sp.lookback / 10))) return c;
 
     // PREMIUM/DISCOUNT
     if (dir == 1 && !IsInDiscount(price, swings)) return c;

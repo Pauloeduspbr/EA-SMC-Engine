@@ -18,7 +18,7 @@ class SwingDetector {
 public:
     SwingDetector();
 
-    void Init(int swing_length);
+    void Init(int swing_length, bool force_alternation = true);
     void Reset();
 
     // Feed historical bars (full recalculation)
@@ -39,6 +39,7 @@ public:
 
 private:
     int swing_length_;
+    bool force_alternation_;
     std::vector<SwingPoint> swings_;
 
     // Per-bar arrays (same size as bars)

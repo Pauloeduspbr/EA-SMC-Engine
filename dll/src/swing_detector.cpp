@@ -8,11 +8,12 @@
 // ============================================================================
 
 SwingDetector::SwingDetector()
-    : swing_length_(50)
+    : swing_length_(50), force_alternation_(true)
 {}
 
-void SwingDetector::Init(int swing_length) {
+void SwingDetector::Init(int swing_length, bool force_alternation) {
     swing_length_ = swing_length;
+    force_alternation_ = force_alternation;
     Reset();
 }
 
@@ -73,7 +74,8 @@ void SwingDetector::Calculate(const std::vector<Bar>& bars) {
     Deduplicate(bars);
 
     // Step 3: Force alternation (ensure H-L-H-L pattern)
-    ForceAlternation(bars);
+    // Disabled for bias swings — phantom swings distort HH/HL analysis
+    if (force_alternation_) ForceAlternation(bars);
 
     // Step 4: Build the swings_ list from bar arrays
     BuildSwingList(bars);

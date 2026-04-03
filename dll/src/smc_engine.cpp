@@ -12,11 +12,12 @@ void SMCEngine::Init(int swing_length, int ob_lookback, double liq_range_pct,
     std::lock_guard<std::mutex> lock(mtx_);
     bars_.clear();
     bars_.reserve(10000);
-    swing_detector_.Init(swing_length);
+    swing_detector_.Init(swing_length, true);  // entry swings: with alternation
     // Bias swing detector: uses larger swings for HTF structure
     // Default: 3x the entry swing length (e.g., swing=3 -> bias=9)
+    // NO ForceAlternation — phantom swings distort HH/HL bias analysis
     int bsl = (bias_swing_length > 0) ? bias_swing_length : swing_length * 3;
-    bias_swing_detector_.Init(bsl);
+    bias_swing_detector_.Init(bsl, false);
     structure_analyzer_.Init(close_break);
     ob_tracker_.Init(close_mitigation);
     fvg_detector_.Init(join_fvg);
