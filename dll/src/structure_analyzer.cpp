@@ -210,40 +210,22 @@ void StructureAnalyzer::DetermineTrend() {
 
 void StructureAnalyzer::CalculateBias(const SwingDetector& bias_swings) {
     bias_ = TREND_NONE;
-    int count = bias_swings.GetCount();
-    if (count < 4) return;
 
-    // Analyze last 4 swings for HH/HL vs LH/LL pattern
-    // Get last 2 swing highs and last 2 swing lows
-    double last_high = 0, prev_high = 0;
-    double last_low = 0, prev_low = 0;
-    int found_highs = 0, found_lows = 0;
+    // Method: count direction of recent structure breaks
+    // This is more responsive than HH/HL which compares against historical extremes
+    // that may be from a different market regime
+    int bull_count = 0, bear_count = 0;
+    int max_breaks = std::min(6, static_cast<int>(breaks_.size()));
 
-    for (int i = count - 1; i >= 0 && (found_highs < 2 || found_lows < 2); --i) {
-        const auto& sp = bias_swings.Get(i);
-        if (sp.type == SWING_HIGH) {
-            if (found_highs == 0) last_high = sp.level;
-            else if (found_highs == 1) prev_high = sp.level;
-            found_highs++;
-        } else if (sp.type == SWING_LOW) {
-            if (found_lows == 0) last_low = sp.level;
-            else if (found_lows == 1) prev_low = sp.level;
-            found_lows++;
-        }
+    for (int i = static_cast<int>(breaks_.size()) - 1; i >= 0 && (bull_count + bear_count) < max_breaks; --i) {
+        if (breaks_[i].direction == TREND_BULLISH) bull_count++;
+        else if (breaks_[i].direction == TREND_BEARISH) bear_count++;
     }
 
-    if (found_highs < 2 || found_lows < 2) return;
-
-    // HH + HL = bullish bias
-    bool higher_high = last_high > prev_high;
-    bool higher_low  = last_low > prev_low;
-    // LH + LL = bearish bias
-    bool lower_high = last_high < prev_high;
-    bool lower_low  = last_low < prev_low;
-
-    if (higher_high && higher_low) bias_ = TREND_BULLISH;
-    else if (lower_high && lower_low) bias_ = TREND_BEARISH;
-    // Mixed (HH+LL or LH+HL) = NONE (ranging, do not force direction)
+    // Need clear majority (at least 2:1 ratio)
+    if (bull_count >= 2 && bull_count >= bear_count * 2) bias_ = TREND_BULLISH;
+    else if (bear_count >= 2 && bear_count >= bull_count * 2) bias_ = TREND_BEARISH;
+    // Otherwise: mixed/ranging = NONE (no forced direction)
 }
 
 TrendDirection StructureAnalyzer::GetBias() const {

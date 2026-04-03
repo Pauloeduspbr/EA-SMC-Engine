@@ -496,9 +496,13 @@ void OnTick()
          g_statSignals++;
 
          // Diagnostic log
+         int bias = SMC_GetBias();
+         int trend = SMC_GetCurrentTrend();
          Print("SIGNAL: ", (dir == 1 ? "BUY" : "SELL"),
                " | Strat: ", StrategyName(strat),
                " | Score: ", DoubleToString(conf, 2),
+               " | Bias: ", (bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NONE"),
+               " | Trend: ", (trend == 1 ? "BULL" : trend == -1 ? "BEAR" : "NONE"),
                " | Entry: ", DoubleToString(entry, g_digits),
                " | SL: ", DoubleToString(sl, g_digits),
                " (", DoubleToString(MathAbs(entry-sl)/g_point, 0), " pts)",
