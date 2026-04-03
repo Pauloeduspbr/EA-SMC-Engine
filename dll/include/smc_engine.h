@@ -17,7 +17,8 @@ public:
     ~SMCEngine();
 
     void Init(int swing_length, int ob_lookback, double liq_range_pct,
-              bool close_break, bool close_mitigation, bool join_fvg);
+              bool close_break, bool close_mitigation, bool join_fvg,
+              int bias_swing_length = 0);
 
     // Global config
     void ConfigureGlobal(double sl_zone_buffer, int sweep_lookback,
@@ -63,6 +64,7 @@ public:
     double GetStructureLevel(int idx) const;
     int    GetStructureBarIndex(int idx) const;
     int    GetCurrentTrend() const;
+    int    GetBias() const;
 
     // Order Blocks
     int    GetOBCount() const;
@@ -102,6 +104,7 @@ private:
     std::mutex          mtx_;
     std::vector<Bar>    bars_;
     SwingDetector       swing_detector_;
+    SwingDetector       bias_swing_detector_;  // HTF bias (larger swings)
     StructureAnalyzer   structure_analyzer_;
     OrderBlockTracker   ob_tracker_;
     FVGDetector         fvg_detector_;
@@ -121,7 +124,8 @@ private:
 #endif
 
 DLLEXPORT void   STDCALL SMC_Init(int swing_length, int ob_lookback, double liq_range_pct,
-                                   int close_break, int close_mitigation, int join_fvg);
+                                   int close_break, int close_mitigation, int join_fvg,
+                                   int bias_swing_length);
 DLLEXPORT void   STDCALL SMC_ConfigureGlobal(double sl_zone_buffer, int sweep_lookback,
                                               double ote_fib_low, double ote_fib_high,
                                               int kz_as, int kz_ae, int kz_ls, int kz_le,
@@ -161,6 +165,7 @@ DLLEXPORT int    STDCALL SMC_GetStructureDirection(int idx);
 DLLEXPORT double STDCALL SMC_GetStructureLevel(int idx);
 DLLEXPORT int    STDCALL SMC_GetStructureBarIndex(int idx);
 DLLEXPORT int    STDCALL SMC_GetCurrentTrend();
+DLLEXPORT int    STDCALL SMC_GetBias();
 
 // Order Blocks
 DLLEXPORT int    STDCALL SMC_GetOBCount();

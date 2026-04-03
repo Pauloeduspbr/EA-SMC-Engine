@@ -63,30 +63,26 @@ void OrderBlockTracker::CalculateBullish(const std::vector<Bar>& bars, const Swi
                     continue;
                 }
             } else {
-                // Visit tracking: price enters OB zone
-                bool in_zone = (bars[i].low <= ob.top && bars[i].high >= ob.bottom);
-                if (in_zone) {
-                    if (i > 0) {
-                        bool was_outside = (bars[i-1].low > ob.top || bars[i-1].high < ob.bottom);
-                        if (was_outside) ob.visit_count++;
-                    }
-                }
-
-                // Mitigation: body close through OB invalidates it
-                // Wick-through alone does NOT mitigate on first visit (ICT: price
-                // tests OB zone and bounces — the wick IS the entry confirmation)
+                // Mitigation check FIRST (before visit_count increment)
+                // On first touch (visit_count==0): only close below = mitigation
+                // After first visit: body close below = mitigation
                 bool mit = false;
                 double body_low = std::min(bars[i].open, bars[i].close);
                 if (close_mitigation_ || ob.visit_count >= 1) {
-                    // After first visit OR if close_mitigation enabled: body must break
                     mit = body_low < ob.bottom;
                 } else {
-                    // Before first visit: only full candle close below = mitigation
                     mit = bars[i].close < ob.bottom;
                 }
                 if (mit) {
                     ob.mitigated = true;
                     ob.mitigated_index = i;
+                }
+
+                // Visit tracking AFTER mitigation check
+                bool in_zone = (bars[i].low <= ob.top && bars[i].high >= ob.bottom);
+                if (in_zone && i > 0) {
+                    bool was_outside = (bars[i-1].low > ob.top || bars[i-1].high < ob.bottom);
+                    if (was_outside) ob.visit_count++;
                 }
             }
             ++k;
@@ -185,15 +181,7 @@ void OrderBlockTracker::CalculateBearish(const std::vector<Bar>& bars, const Swi
                     continue;
                 }
             } else {
-                // Visit tracking
-                bool in_zone = (bars[i].low <= ob.top && bars[i].high >= ob.bottom);
-                if (in_zone && i > 0) {
-                    bool was_outside = (bars[i-1].low > ob.top || bars[i-1].high < ob.bottom);
-                    if (was_outside) ob.visit_count++;
-                }
-
-                // Mitigation: body close through OB invalidates it
-                // Same ICT logic as bullish: wick-through on first visit is the entry
+                // Mitigation check FIRST (before visit_count increment)
                 bool mit = false;
                 double body_high = std::max(bars[i].open, bars[i].close);
                 if (close_mitigation_ || ob.visit_count >= 1) {
@@ -204,6 +192,13 @@ void OrderBlockTracker::CalculateBearish(const std::vector<Bar>& bars, const Swi
                 if (mit) {
                     ob.mitigated = true;
                     ob.mitigated_index = i;
+                }
+
+                // Visit tracking AFTER mitigation check
+                bool in_zone = (bars[i].low <= ob.top && bars[i].high >= ob.bottom);
+                if (in_zone && i > 0) {
+                    bool was_outside = (bars[i-1].low > ob.top || bars[i-1].high < ob.bottom);
+                    if (was_outside) ob.visit_count++;
                 }
             }
             ++k;

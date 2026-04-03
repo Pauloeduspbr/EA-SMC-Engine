@@ -35,6 +35,10 @@ public:
     // Current trend (derived from latest BOS/CHoCH)
     TrendDirection GetCurrentTrend() const;
 
+    // HTF bias (derived from swing sequence: HH/HL vs LH/LL)
+    TrendDirection GetBias() const;
+    void CalculateBias(const SwingDetector& bias_swings);
+
     // Last BOS / CHoCH
     StructureBreak GetLastBOS() const;
     StructureBreak GetLastCHoCH() const;
@@ -47,6 +51,7 @@ private:
     bool close_break_;
     std::vector<StructureBreak> breaks_;
     TrendDirection current_trend_;
+    TrendDirection bias_;
 
     // Per-bar arrays
     std::vector<int> bar_bos_;    // 0, 1, -1

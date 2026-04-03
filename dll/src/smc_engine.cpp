@@ -7,11 +7,16 @@ SMCEngine::SMCEngine() : initialized_(false) { std::memset(&current_signal_, 0, 
 SMCEngine::~SMCEngine() {}
 
 void SMCEngine::Init(int swing_length, int ob_lookback, double liq_range_pct,
-                     bool close_break, bool close_mitigation, bool join_fvg) {
+                     bool close_break, bool close_mitigation, bool join_fvg,
+                     int bias_swing_length) {
     std::lock_guard<std::mutex> lock(mtx_);
     bars_.clear();
     bars_.reserve(10000);
     swing_detector_.Init(swing_length);
+    // Bias swing detector: uses larger swings for HTF structure
+    // Default: 3x the entry swing length (e.g., swing=3 -> bias=9)
+    int bsl = (bias_swing_length > 0) ? bias_swing_length : swing_length * 3;
+    bias_swing_detector_.Init(bsl);
     structure_analyzer_.Init(close_break);
     ob_tracker_.Init(close_mitigation);
     fvg_detector_.Init(join_fvg);
@@ -90,11 +95,13 @@ int SMCEngine::Process() {
     std::lock_guard<std::mutex> lock(mtx_);
     if (!initialized_ || bars_.size() < 20) return 0;
     swing_detector_.Calculate(bars_);
+    bias_swing_detector_.Calculate(bars_);
     structure_analyzer_.Calculate(bars_, swing_detector_);
+    structure_analyzer_.CalculateBias(bias_swing_detector_);
     ob_tracker_.Calculate(bars_, swing_detector_);
     fvg_detector_.Calculate(bars_);
     liq_mapper_.Calculate(bars_, swing_detector_);
-    current_signal_ = signal_generator_.Generate(bars_, swing_detector_, structure_analyzer_, ob_tracker_, fvg_detector_, liq_mapper_);
+    current_signal_ = signal_generator_.Generate(bars_, swing_detector_, structure_analyzer_, ob_tracker_, fvg_detector_, liq_mapper_, bias_swing_detector_);
     return static_cast<int>(bars_.size());
 }
 
@@ -126,6 +133,7 @@ int    SMCEngine::GetStructureDirection(int i) const { return (i>=0&&i<structure
 double SMCEngine::GetStructureLevel(int i) const { return (i>=0&&i<structure_analyzer_.GetBreakCount()) ? structure_analyzer_.Get(i).level : 0.0; }
 int    SMCEngine::GetStructureBarIndex(int i) const { return (i>=0&&i<structure_analyzer_.GetBreakCount()) ? structure_analyzer_.Get(i).index : -1; }
 int    SMCEngine::GetCurrentTrend() const { return static_cast<int>(structure_analyzer_.GetCurrentTrend()); }
+int    SMCEngine::GetBias() const { return static_cast<int>(structure_analyzer_.GetBias()); }
 
 // --- OB ---
 int    SMCEngine::GetOBCount() const { return ob_tracker_.GetTotalCount(); }
@@ -162,8 +170,8 @@ int    SMCEngine::GetBarCount() const { return static_cast<int>(bars_.size()); }
 // DLL Exports — try/catch on every function
 // ============================================================================
 
-DLLEXPORT void STDCALL SMC_Init(int sl, int ol, double lr, int cb, int cm, int jf) {
-    try { g_engine.Init(sl, ol, lr, cb!=0, cm!=0, jf!=0); } catch (...) {}
+DLLEXPORT void STDCALL SMC_Init(int sl, int ol, double lr, int cb, int cm, int jf, int bsl) {
+    try { g_engine.Init(sl, ol, lr, cb!=0, cm!=0, jf!=0, bsl); } catch (...) {}
 }
 
 DLLEXPORT void STDCALL SMC_ConfigureGlobal(double szb, int swl, double ofl, double ofh,
@@ -203,6 +211,7 @@ DLLEXPORT int    STDCALL SMC_GetStructureDirection(int i)   { try { return g_eng
 DLLEXPORT double STDCALL SMC_GetStructureLevel(int i)      { try { return g_engine.GetStructureLevel(i); } catch (...) { return 0; } }
 DLLEXPORT int    STDCALL SMC_GetStructureBarIndex(int i)    { try { return g_engine.GetStructureBarIndex(i); } catch (...) { return -1; } }
 DLLEXPORT int    STDCALL SMC_GetCurrentTrend()             { try { return g_engine.GetCurrentTrend(); } catch (...) { return 0; } }
+DLLEXPORT int    STDCALL SMC_GetBias()                    { try { return g_engine.GetBias(); } catch (...) { return 0; } }
 
 DLLEXPORT int    STDCALL SMC_GetOBCount()                  { try { return g_engine.GetOBCount(); } catch (...) { return 0; } }
 DLLEXPORT int    STDCALL SMC_GetActiveOBCount(int d)       { try { return g_engine.GetActiveOBCount(d); } catch (...) { return 0; } }

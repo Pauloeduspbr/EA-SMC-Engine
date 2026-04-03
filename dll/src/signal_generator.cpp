@@ -3,8 +3,8 @@
 #include <cmath>
 #include <ctime>
 
-SignalGenerator::SignalGenerator() : last_score_(0.0) { last_signal_ = Signal{}; }
-void SignalGenerator::Init(const SignalConfig& config) { config_ = config; last_signal_ = Signal{}; last_score_ = 0.0; }
+SignalGenerator::SignalGenerator() : last_score_(0.0), last_used_bos_index_(-1), last_used_choch_index_(-1), bias_swings_(nullptr) { last_signal_ = Signal{}; }
+void SignalGenerator::Init(const SignalConfig& config) { config_ = config; last_signal_ = Signal{}; last_score_ = 0.0; last_used_bos_index_ = -1; last_used_choch_index_ = -1; bias_swings_ = nullptr; }
 const Signal& SignalGenerator::GetLastSignal() const { return last_signal_; }
 double SignalGenerator::GetLastScore() const { return last_score_; }
 const SignalConfig& SignalGenerator::GetConfig() const { return config_; }
@@ -17,16 +17,46 @@ void SignalGenerator::SetConfig(const SignalConfig& config) { config_ = config; 
 Signal SignalGenerator::Generate(
     const std::vector<Bar>& bars, const SwingDetector& swings,
     const StructureAnalyzer& structure, const OrderBlockTracker& ob_tracker,
-    const FVGDetector& fvg_detector, const LiquidityMapper& liq_mapper)
+    const FVGDetector& fvg_detector, const LiquidityMapper& liq_mapper,
+    const SwingDetector& bias_swings)
 {
     last_signal_ = Signal{}; last_score_ = 0.0;
+    bias_swings_ = &bias_swings;
     int n = static_cast<int>(bars.size());
     if (n < 50) return last_signal_;
 
+    // Direction logic:
+    // 1. Check for recent CHoCH — it OVERRIDES bias (signals trend change)
+    // 2. If no CHoCH, use bias (HTF swing structure)
+    // 3. Trend (last BOS/CHoCH) must confirm direction
+    TrendDirection bias = structure.GetBias();
     TrendDirection trend = structure.GetCurrentTrend();
-    if (trend == TREND_NONE) return last_signal_;
-    int direction = static_cast<int>(trend);
     int bar_idx = n - 1;
+
+    // CHoCH overrides bias: if recent CHoCH exists, use its direction
+    // CHoCH = "Change of Character" = the market is REVERSING
+    // Use the CHoCH strategy's own lookback setting (not hardcoded)
+    StructureBreak last_choch = structure.GetLastCHoCH();
+    int choch_lookback = config_.choch_reversal.lookback;
+    bool choch_active = (last_choch.index >= 0 &&
+                         last_choch.broken_index >= 0 &&
+                         (bar_idx - last_choch.broken_index) <= choch_lookback);
+
+    int direction = 0;
+    if (choch_active) {
+        // CHoCH direction takes priority — it signals the NEW trend
+        direction = static_cast<int>(last_choch.direction);
+    } else if (bias != TREND_NONE) {
+        direction = static_cast<int>(bias);
+        // If trend exists and conflicts with bias, do not trade
+        if (trend != TREND_NONE && trend != bias) {
+            return last_signal_;
+        }
+    } else if (trend != TREND_NONE) {
+        direction = static_cast<int>(trend);
+    } else {
+        return last_signal_;
+    }
 
     std::vector<SignalCandidate> candidates;
 
@@ -39,12 +69,10 @@ Signal SignalGenerator::Generate(
         if (c.signal.direction != 0) candidates.push_back(c);
     }
     if (config_.choch_reversal.enabled) {
-        // CHoCH reversal: scan BOTH directions because a CHoCH signals
-        // a trend change — the new direction may not yet be the current trend
-        auto c1 = ScanCHoCHReversal(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-        if (c1.signal.direction != 0) candidates.push_back(c1);
-        auto c2 = ScanCHoCHReversal(-direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
-        if (c2.signal.direction != 0) candidates.push_back(c2);
+        // CHoCH reversal: scan in trend direction only
+        // The CHoCH already changed the trend — we trade the NEW trend direction
+        auto c = ScanCHoCHReversal(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
+        if (c.signal.direction != 0) candidates.push_back(c);
     }
     if (config_.fvg_fill.enabled) {
         auto c = ScanFVGFill(direction, bar_idx, bars, swings, structure, ob_tracker, fvg_detector, liq_mapper);
@@ -62,6 +90,14 @@ Signal SignalGenerator::Generate(
     }
 
     if (best.signal.direction != 0) {
+        // Mark the structure break as used to prevent repeat signals
+        if (best.signal.strategy == STRAT_BOS_CONTINUATION) {
+            StructureBreak lb = structure.GetLastBOS();
+            last_used_bos_index_ = lb.broken_index;
+        } else if (best.signal.strategy == STRAT_CHOCH_REVERSAL) {
+            StructureBreak lc = structure.GetLastCHoCH();
+            last_used_choch_index_ = lc.broken_index;
+        }
         best.signal.confidence = best.score;
         best.signal.bar_index = bar_idx;
         last_signal_ = best.signal;
@@ -138,9 +174,9 @@ double SignalGenerator::FindStructuralSL(
                 break;
             }
         }
-        // OB bottom if gives wider protection
+        // OB bottom: use TIGHTER of swing low vs OB bottom (ICT: SL just beyond zone)
         const OrderBlock* ob = ob_tracker.FindOBAtPrice(entry, 1);
-        if (ob && (sl == 0 || ob->bottom < sl)) sl = ob->bottom;
+        if (ob && (sl == 0 || ob->bottom > sl)) sl = ob->bottom;
 
         if (sl > 0) sl -= (entry - sl) * config_.sl_zone_buffer;
     } else {
@@ -151,8 +187,9 @@ double SignalGenerator::FindStructuralSL(
                 break;
             }
         }
+        // OB top: use TIGHTER of swing high vs OB top
         const OrderBlock* ob = ob_tracker.FindOBAtPrice(entry, -1);
-        if (ob && (sl == 0 || ob->top > sl)) sl = ob->top;
+        if (ob && (sl == 0 || ob->top < sl)) sl = ob->top;
 
         if (sl > 0) sl += (sl - entry) * config_.sl_zone_buffer;
     }
@@ -187,33 +224,34 @@ double SignalGenerator::FindStructuralTP(
     double min_tp = config_.min_tp_distance;
     double tp = 0.0;
 
-    // Progressive lookback: try configured, then 2x, then all bars
-    // This ensures we always find a structural target if one exists
-    int lookbacks[] = { config_.max_tp_lookback, config_.max_tp_lookback * 2, n };
+    // Use BIAS swings first (larger structure = better TP targets)
+    // Fallback to entry swings if no bias swing target found
+    const SwingDetector* swing_sources[] = { bias_swings_, &swings };
+    int num_sources = (bias_swings_ != nullptr) ? 2 : 1;
+    if (bias_swings_ == nullptr) swing_sources[0] = &swings;
 
-    for (int attempt = 0; attempt < 3 && tp == 0.0; ++attempt) {
-        int min_bar = n - 1 - lookbacks[attempt];
-        if (min_bar < 0) min_bar = 0;
-        double best_dist = 1e18;
+    for (int src = 0; src < num_sources && tp == 0.0; ++src) {
+        const SwingDetector& sw = *swing_sources[src];
 
+        // Find FIRST valid structural target beyond MinTP
         if (direction == 1) {
-            for (int i = swings.GetCount() - 1; i >= 0; --i) {
-                const auto& s = swings.Get(i);
-                if (s.index < min_bar) break;
+            for (int i = sw.GetCount() - 1; i >= 0; --i) {
+                const auto& s = sw.Get(i);
                 if (s.type == SWING_HIGH && s.level > entry) {
                     double d = s.level - entry;
                     if (min_tp > 0 && d < min_tp) continue;
-                    if (d < best_dist) { best_dist = d; tp = s.level; }
+                    tp = s.level;
+                    break;
                 }
             }
         } else {
-            for (int i = swings.GetCount() - 1; i >= 0; --i) {
-                const auto& s = swings.Get(i);
-                if (s.index < min_bar) break;
+            for (int i = sw.GetCount() - 1; i >= 0; --i) {
+                const auto& s = sw.Get(i);
                 if (s.type == SWING_LOW && s.level < entry) {
                     double d = entry - s.level;
                     if (min_tp > 0 && d < min_tp) continue;
-                    if (d < best_dist) { best_dist = d; tp = s.level; }
+                    tp = s.level;
+                    break;
                 }
             }
         }
@@ -389,7 +427,8 @@ SignalCandidate SignalGenerator::ScanBOSContinuation(int dir, int bar_idx,
     StructureBreak last_bos = structure.GetLastBOS();
     if (last_bos.index < 0) return c;
     if (static_cast<int>(last_bos.direction) != dir) return c;
-    if ((bar_idx - last_bos.index) > sp.lookback) return c;
+    if ((bar_idx - last_bos.broken_index) > sp.lookback) return c;
+    if (last_bos.broken_index == last_used_bos_index_) return c;
 
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
@@ -422,7 +461,9 @@ SignalCandidate SignalGenerator::ScanCHoCHReversal(int dir, int bar_idx,
     StructureBreak last_choch = structure.GetLastCHoCH();
     if (last_choch.index < 0) return c;
     if (static_cast<int>(last_choch.direction) != dir) return c;
-    if ((bar_idx - last_choch.index) > sp.lookback) return c;
+    if ((bar_idx - last_choch.broken_index) > sp.lookback) return c;
+    // Prevent same CHoCH from generating multiple signals
+    if (last_choch.broken_index == last_used_choch_index_) return c;
 
     const OrderBlock* ob = ob_tracker.FindOBAtPrice(price, dir);
     const FairValueGap* fvg = fvg_detector.FindFVGAtPrice(price, dir);
@@ -494,9 +535,9 @@ SignalCandidate SignalGenerator::ScanLiqSweep(int dir, int bar_idx,
     StructureBreak last_bos = structure.GetLastBOS();
     bool has_struct = false, is_choch = false;
     if (last_choch.index >= 0 && static_cast<int>(last_choch.direction) == dir
-        && (bar_idx - last_choch.index) <= sp.lookback) { has_struct = true; is_choch = true; }
+        && (bar_idx - last_choch.broken_index) <= sp.lookback) { has_struct = true; is_choch = true; }
     if (last_bos.index >= 0 && static_cast<int>(last_bos.direction) == dir
-        && (bar_idx - last_bos.index) <= sp.lookback) { has_struct = true; }
+        && (bar_idx - last_bos.broken_index) <= sp.lookback) { has_struct = true; }
     if (!has_struct) return c;
 
     // After sweep, price displaces rapidly. Entry confirmation:

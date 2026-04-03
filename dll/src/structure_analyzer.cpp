@@ -8,7 +8,7 @@
 // ============================================================================
 
 StructureAnalyzer::StructureAnalyzer()
-    : close_break_(true), current_trend_(TREND_NONE)
+    : close_break_(true), current_trend_(TREND_NONE), bias_(TREND_NONE)
 {}
 
 void StructureAnalyzer::Init(bool close_break) {
@@ -19,6 +19,7 @@ void StructureAnalyzer::Init(bool close_break) {
 void StructureAnalyzer::Reset() {
     breaks_.clear();
     current_trend_ = TREND_NONE;
+    bias_ = TREND_NONE;
     bar_bos_.clear();
     bar_choch_.clear();
     bar_level_.clear();
@@ -203,6 +204,50 @@ void StructureAnalyzer::DetermineTrend() {
     if (!breaks_.empty()) {
         current_trend_ = breaks_.back().direction;
     }
+}
+
+// --- HTF Bias from swing sequence ---
+
+void StructureAnalyzer::CalculateBias(const SwingDetector& bias_swings) {
+    bias_ = TREND_NONE;
+    int count = bias_swings.GetCount();
+    if (count < 4) return;
+
+    // Analyze last 4 swings for HH/HL vs LH/LL pattern
+    // Get last 2 swing highs and last 2 swing lows
+    double last_high = 0, prev_high = 0;
+    double last_low = 0, prev_low = 0;
+    int found_highs = 0, found_lows = 0;
+
+    for (int i = count - 1; i >= 0 && (found_highs < 2 || found_lows < 2); --i) {
+        const auto& sp = bias_swings.Get(i);
+        if (sp.type == SWING_HIGH) {
+            if (found_highs == 0) last_high = sp.level;
+            else if (found_highs == 1) prev_high = sp.level;
+            found_highs++;
+        } else if (sp.type == SWING_LOW) {
+            if (found_lows == 0) last_low = sp.level;
+            else if (found_lows == 1) prev_low = sp.level;
+            found_lows++;
+        }
+    }
+
+    if (found_highs < 2 || found_lows < 2) return;
+
+    // HH + HL = bullish bias
+    bool higher_high = last_high > prev_high;
+    bool higher_low  = last_low > prev_low;
+    // LH + LL = bearish bias
+    bool lower_high = last_high < prev_high;
+    bool lower_low  = last_low < prev_low;
+
+    if (higher_high && higher_low) bias_ = TREND_BULLISH;
+    else if (lower_high && lower_low) bias_ = TREND_BEARISH;
+    // Mixed (HH+LL or LH+HL) = NONE (ranging, do not force direction)
+}
+
+TrendDirection StructureAnalyzer::GetBias() const {
+    return bias_;
 }
 
 // --- Getters ---

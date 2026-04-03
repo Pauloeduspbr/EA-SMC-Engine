@@ -121,12 +121,14 @@ void FVGDetector::TrackMitigation(const std::vector<Bar>& bars) {
             }
             in_zone_prev = in_zone;
 
-            // Mitigation check
+            // Mitigation: close-based (ICT: wick into FVG = entry, not invalidation)
+            // Bullish FVG mitigated when candle CLOSES below bottom
+            // Bearish FVG mitigated when candle CLOSES above top
             bool mitigated = false;
             if (fvg.direction == 1) {
-                mitigated = bars[j].low <= fvg.bottom; // price breaks through bottom
+                mitigated = bars[j].close < fvg.bottom;
             } else {
-                mitigated = bars[j].high >= fvg.top;   // price breaks through top
+                mitigated = bars[j].close > fvg.top;
             }
 
             if (mitigated) {

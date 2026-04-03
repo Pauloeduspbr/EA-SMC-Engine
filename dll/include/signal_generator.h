@@ -101,7 +101,8 @@ public:
     Signal Generate(
         const std::vector<Bar>& bars, const SwingDetector& swings,
         const StructureAnalyzer& structure, const OrderBlockTracker& ob_tracker,
-        const FVGDetector& fvg_detector, const LiquidityMapper& liq_mapper);
+        const FVGDetector& fvg_detector, const LiquidityMapper& liq_mapper,
+        const SwingDetector& bias_swings);
 
     const Signal& GetLastSignal() const;
     double GetLastScore() const;
@@ -112,6 +113,9 @@ private:
     SignalConfig config_;
     Signal last_signal_;
     double last_score_;
+    int last_used_bos_index_;    // prevent same BOS generating multiple signals
+    int last_used_choch_index_;  // prevent same CHoCH generating multiple signals
+    const SwingDetector* bias_swings_; // HTF swings for TP targets (set per Generate call)
 
     // Helpers
     bool IsInDiscount(double price, const SwingDetector& swings) const;

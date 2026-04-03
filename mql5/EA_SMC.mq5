@@ -19,7 +19,8 @@
 #import "smc_engine.dll"
    // Lifecycle
    void   SMC_Init(int swing_length, int ob_lookback, double liq_range_pct,
-                    int close_break, int close_mitigation, int join_fvg);
+                    int close_break, int close_mitigation, int join_fvg,
+                    int bias_swing_length);
    void   SMC_ConfigureGlobal(double sl_zone_buffer, int sweep_lookback,
                                double ote_fib_low, double ote_fib_high,
                                int kz_as, int kz_ae, int kz_ls, int kz_le,
@@ -59,6 +60,7 @@
    double SMC_GetStructureLevel(int idx);
    int    SMC_GetStructureBarIndex(int idx);
    int    SMC_GetCurrentTrend();
+   int    SMC_GetBias();
 
    // Order Blocks
    int    SMC_GetOBCount();
@@ -116,6 +118,7 @@ input int            InpHistoryBars    = 1000;            // Historical Bars to 
 
 input group "============ SMC DETECTION ============"
 input int            InpSwingLength    = 5;               // Swing Detection Length
+input int            InpBiasSwingLength = 0;              // HTF Bias Swing Length (0=auto 3x)
 input int            InpOBLookback     = 50;              // Order Block Lookback (bars)
 input double         InpLiqRangePct    = 0.01;            // Liquidity Range (% of price range)
 input bool           InpCloseBreak     = true;            // BOS/CHoCH on Close (vs High/Low)
@@ -308,7 +311,8 @@ int OnInit()
 
    // --- Initialize DLL ---
    SMC_Init(InpSwingLength, InpOBLookback, InpLiqRangePct,
-            InpCloseBreak ? 1 : 0, InpCloseMitigation ? 1 : 0, InpJoinFVG ? 1 : 0);
+            InpCloseBreak ? 1 : 0, InpCloseMitigation ? 1 : 0, InpJoinFVG ? 1 : 0,
+            InpBiasSwingLength);
 
    // --- Configure global signal parameters ---
    double minSLDist = InpMinSLPoints * g_tickSize;
@@ -610,19 +614,34 @@ void ExecuteSignal(int direction, double entry, double sl, double tp,
    sl = NormalizeDouble(sl, g_digits);
    tp = NormalizeDouble(tp, g_digits);
 
-   // --- Validate stops ---
+   // --- Validate stops against broker minimum ---
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDist = stopsLevel * g_point;
+   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double spreadDist = spread * g_point;
+
+   // Add spread to minimum distance for safety
+   double safeMinDist = minDist + spreadDist;
 
    if(direction == 1)
    {
-      if(price - sl < minDist) sl = price - minDist;
-      if(tp - price < minDist) tp = price + minDist;
+      if(price - sl < safeMinDist || tp - price < safeMinDist)
+      {
+         Print("REJECT: Stops too close to price. SL_dist=", DoubleToString((price-sl)/g_point, 0),
+               " TP_dist=", DoubleToString((tp-price)/g_point, 0),
+               " MinDist=", DoubleToString(safeMinDist/g_point, 0), " pts");
+         return;
+      }
    }
    else
    {
-      if(sl - price < minDist) sl = price + minDist;
-      if(price - tp < minDist) tp = price - minDist;
+      if(sl - price < safeMinDist || price - tp < safeMinDist)
+      {
+         Print("REJECT: Stops too close to price. SL_dist=", DoubleToString((sl-price)/g_point, 0),
+               " TP_dist=", DoubleToString((price-tp)/g_point, 0),
+               " MinDist=", DoubleToString(safeMinDist/g_point, 0), " pts");
+         return;
+      }
    }
 
    sl = NormalizeDouble(sl, g_digits);
@@ -1179,6 +1198,9 @@ void DrawPanel()
 {
    ObjectsDeleteAll(0, "PANEL_");
 
+   int bias = SMC_GetBias();
+   string biasStr = (bias == 1) ? "BULLISH" : (bias == -1) ? "BEARISH" : "NONE";
+   color biaClr = (bias == 1) ? clrLimeGreen : (bias == -1) ? clrCrimson : clrGray;
    int trend = SMC_GetCurrentTrend();
    string trendStr = (trend == 1) ? "BULLISH" : (trend == -1) ? "BEARISH" : "NONE";
    color trendClr = (trend == 1) ? clrLimeGreen : (trend == -1) ? clrCrimson : clrGray;
